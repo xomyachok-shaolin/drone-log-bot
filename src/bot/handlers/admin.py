@@ -88,7 +88,7 @@ async def cmd_delete_log(message: Message, employee: dict) -> None:
     ok = await delete_log(log_id)
     if ok:
         alog.info("log_deleted", log_id=log_id, by=employee["telegram_id"])
-        await message.answer(f"Запись #{log_id} скрыта (данные сохранены).")
+        await message.answer(f"Запись #{log_id} удалена.")
     else:
         await message.answer(f"Запись #{log_id} не найдена.")
 

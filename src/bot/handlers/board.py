@@ -73,7 +73,7 @@ async def cmd_board_delete(message: Message, employee: dict) -> None:
     serial = args[1].upper()
     ok = await delete_board(serial)
     if ok:
-        await message.answer(f"Борт {serial} скрыт (данные сохранены).")
+        await message.answer(f"Борт {serial} удалён.")
     else:
         await message.answer(f"Борт {serial} не найден.")
 
