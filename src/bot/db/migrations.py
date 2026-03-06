@@ -1,0 +1,58 @@
+import aiosqlite
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS employees (
+    telegram_id   INTEGER PRIMARY KEY,
+    full_name     TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'worker',
+    position      TEXT,
+    registered_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS boards (
+    serial        TEXT PRIMARY KEY,
+    model         TEXT,
+    description   TEXT,
+    is_active     INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT DEFAULT (datetime('now')),
+    created_by    INTEGER REFERENCES employees(telegram_id)
+);
+
+CREATE TABLE IF NOT EXISTS work_logs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    board_serial  TEXT NOT NULL REFERENCES boards(serial),
+    employee_id   INTEGER NOT NULL REFERENCES employees(telegram_id),
+    category      TEXT NOT NULL,
+    description   TEXT NOT NULL,
+    is_active     INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS work_photos (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_log_id   INTEGER NOT NULL REFERENCES work_logs(id) ON DELETE CASCADE,
+    file_id       TEXT NOT NULL,
+    caption       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_logs_board ON work_logs(board_serial);
+CREATE INDEX IF NOT EXISTS idx_logs_employee ON work_logs(employee_id);
+CREATE INDEX IF NOT EXISTS idx_logs_date ON work_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_logs_category ON work_logs(category);
+"""
+
+# Add is_active column to existing tables (safe to run repeatedly)
+MIGRATIONS = [
+    "ALTER TABLE boards ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE work_logs ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
+]
+
+
+async def run_migrations(db: aiosqlite.Connection) -> None:
+    await db.executescript(SCHEMA)
+    for sql in MIGRATIONS:
+        try:
+            await db.execute(sql)
+        except Exception:
+            pass  # column already exists
+    await db.commit()

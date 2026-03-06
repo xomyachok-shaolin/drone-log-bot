@@ -1,0 +1,15 @@
+services:
+  drone-log-bot:
+    build: .
+    env_file: .env
+    volumes:
+      - bot-data:/app/data
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
+volumes:
+  bot-data:

@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.env
+.git/
+data/
+tests/
+assets/logo.png
+bot.log
+*.md
