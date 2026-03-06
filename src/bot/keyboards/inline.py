@@ -93,3 +93,35 @@ def pagination_keyboard(prefix: str, page: int, total: int, page_size: int) -> I
     if (page + 1) * page_size < total:
         buttons.append(InlineKeyboardButton(text="вперёд >", callback_data=f"{prefix}:{page + 1}"))
     return InlineKeyboardMarkup(inline_keyboard=[buttons])
+
+
+def edit_field_keyboard(log_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Категорию", callback_data=f"edit_f:cat:{log_id}"),
+                InlineKeyboardButton(text="Описание", callback_data=f"edit_f:desc:{log_id}"),
+            ],
+            [InlineKeyboardButton(text="Отмена", callback_data="edit_f:cancel:0")],
+        ]
+    )
+
+
+def templates_keyboard(templates: list[dict], action: str = "use") -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for t in templates:
+        prefix = "tpl_use" if action == "use" else "tpl_del"
+        builder.button(text=t["name"], callback_data=f"{prefix}:{t['id']}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def confirm_duplicate_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Да, сохранить", callback_data="dup:save"),
+                InlineKeyboardButton(text="Отменить", callback_data="dup:cancel"),
+            ]
+        ]
+    )

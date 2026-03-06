@@ -35,6 +35,15 @@ async def delete_board(serial: str) -> bool:
     return cursor.rowcount > 0
 
 
+async def restore_board(serial: str) -> bool:
+    db = await get_db()
+    cursor = await db.execute(
+        "UPDATE boards SET is_active = 1 WHERE serial = ? AND is_active = 0", (serial,)
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
 async def list_boards() -> list[dict]:
     db = await get_db()
     rows = await db.execute_fetchall(

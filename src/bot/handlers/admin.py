@@ -1,23 +1,33 @@
 import asyncio
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import structlog
 
 from aiogram import Bot, Router, F
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 
+from bot.db.boards import list_boards, restore_board
 from bot.db.employees import list_employees, set_role
-from bot.db.work_logs import delete_log, get_logs_by_board, get_photos
-from bot.db.boards import list_boards
+from bot.db.work_logs import (
+    delete_log, get_log, get_logs_by_board, get_photos,
+    restore_log, update_log, get_stats, get_logs_for_export,
+)
 from bot.export_pdf import build_board_pdf, build_full_pdf
-from bot.keyboards.inline import CATEGORIES, boards_keyboard
+from bot.keyboards.inline import (
+    CATEGORIES, boards_keyboard, categories_keyboard, edit_field_keyboard,
+)
+from bot.states.work_log import EditLogStates
 
 alog = structlog.get_logger()
 
 router = Router()
 
+
+# --- set_role ---
 
 @router.message(Command("set_role"))
 async def cmd_set_role(message: Message, employee: dict) -> None:
@@ -49,6 +59,8 @@ async def cmd_set_role(message: Message, employee: dict) -> None:
         await message.answer(f"Пользователь {target_id} не найден.")
 
 
+# --- users ---
+
 @router.message(Command("users"))
 async def cmd_users(message: Message, employee: dict) -> None:
     if employee["role"] != "admin":
@@ -67,6 +79,8 @@ async def cmd_users(message: Message, employee: dict) -> None:
 
     await message.answer("\n".join(lines))
 
+
+# --- delete / restore log ---
 
 @router.message(Command("delete_log"))
 async def cmd_delete_log(message: Message, employee: dict) -> None:
@@ -93,6 +107,189 @@ async def cmd_delete_log(message: Message, employee: dict) -> None:
         await message.answer(f"Запись #{log_id} не найдена.")
 
 
+@router.message(Command("restore_log"))
+async def cmd_restore_log(message: Message, employee: dict) -> None:
+    if employee["role"] != "admin":
+        await message.answer("Только админ может восстанавливать записи.")
+        return
+
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("Использование: /restore_log <id>")
+        return
+
+    try:
+        log_id = int(args[1])
+    except ValueError:
+        await message.answer("ID должен быть числом.")
+        return
+
+    ok = await restore_log(log_id)
+    if ok:
+        alog.info("log_restored", log_id=log_id, by=employee["telegram_id"])
+        await message.answer(f"Запись #{log_id} восстановлена.")
+    else:
+        await message.answer(f"Запись #{log_id} не найдена среди удалённых.")
+
+
+@router.message(Command("restore_board"))
+async def cmd_restore_board(message: Message, employee: dict) -> None:
+    if employee["role"] != "admin":
+        await message.answer("Только админ может восстанавливать борта.")
+        return
+
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Использование: /restore_board <серийный_номер>")
+        return
+
+    serial = args[1].upper()
+    ok = await restore_board(serial)
+    if ok:
+        alog.info("board_restored", serial=serial, by=employee["telegram_id"])
+        await message.answer(f"Борт {serial} восстановлен.")
+    else:
+        await message.answer(f"Борт {serial} не найден среди удалённых.")
+
+
+# --- edit log ---
+
+@router.message(Command("edit_log"))
+async def cmd_edit_log(message: Message, state: FSMContext, employee: dict) -> None:
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("Использование: /edit_log <id>")
+        return
+
+    try:
+        log_id = int(args[1])
+    except ValueError:
+        await message.answer("ID должен быть числом.")
+        return
+
+    entry = await get_log(log_id)
+    if not entry:
+        await message.answer(f"Запись #{log_id} не найдена.")
+        return
+
+    # Only author or admin can edit
+    if entry["employee_id"] != employee["telegram_id"] and employee["role"] != "admin":
+        await message.answer("Можно редактировать только свои записи.")
+        return
+
+    cat_name = CATEGORIES.get(entry["category"], entry["category"])
+    await state.set_state(EditLogStates.choosing_field)
+    await state.update_data(edit_log_id=log_id, edit_category=entry["category"], edit_description=entry["description"])
+    await message.answer(
+        f"Запись #{log_id}\n"
+        f"Категория: {cat_name}\n"
+        f"Описание: {entry['description'][:200]}\n\n"
+        f"Что изменить?",
+        reply_markup=edit_field_keyboard(log_id),
+    )
+
+
+@router.callback_query(EditLogStates.choosing_field, F.data.startswith("edit_f:"))
+async def edit_field_chosen(callback: CallbackQuery, state: FSMContext) -> None:
+    parts = callback.data.split(":")
+    field = parts[1]
+
+    if field == "cancel":
+        await state.clear()
+        await callback.message.edit_text("Редактирование отменено.")
+        await callback.answer()
+        return
+
+    if field == "cat":
+        await state.set_state(EditLogStates.editing_category)
+        await callback.message.edit_text("Выберите новую категорию:", reply_markup=categories_keyboard())
+    elif field == "desc":
+        await state.set_state(EditLogStates.editing_description)
+        await callback.message.edit_text("Введите новое описание:")
+    await callback.answer()
+
+
+@router.callback_query(EditLogStates.editing_category, F.data.startswith("cat:"))
+async def edit_category_chosen(callback: CallbackQuery, state: FSMContext) -> None:
+    category = callback.data.split(":")[1]
+    data = await state.get_data()
+    ok = await update_log(data["edit_log_id"], category, data["edit_description"])
+    await state.clear()
+    if ok:
+        cat_name = CATEGORIES.get(category, category)
+        await callback.message.edit_text(f"Категория записи #{data['edit_log_id']} изменена на: {cat_name}")
+    else:
+        await callback.message.edit_text("Не удалось обновить запись.")
+    await callback.answer()
+
+
+@router.message(EditLogStates.editing_description, F.text)
+async def edit_description_entered(message: Message, state: FSMContext) -> None:
+    text = message.text.strip()
+    if len(text) < 5:
+        await message.answer("Описание слишком короткое (минимум 5 символов).")
+        return
+    data = await state.get_data()
+    ok = await update_log(data["edit_log_id"], data["edit_category"], text)
+    await state.clear()
+    if ok:
+        await message.answer(f"Описание записи #{data['edit_log_id']} обновлено.")
+    else:
+        await message.answer("Не удалось обновить запись.")
+
+
+# --- stats ---
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message, employee: dict) -> None:
+    if employee["role"] not in ("lead", "admin"):
+        await message.answer("Статистика доступна руководителям и админам.")
+        return
+
+    args = message.text.split()
+    date_from = args[1] if len(args) > 1 else None
+    date_to = args[2] if len(args) > 2 else None
+
+    # Validate dates
+    for d in (date_from, date_to):
+        if d:
+            try:
+                datetime.strptime(d, "%Y-%m-%d")
+            except ValueError:
+                await message.answer("Формат дат: /stats [YYYY-MM-DD] [YYYY-MM-DD]")
+                return
+
+    stats = await get_stats(date_from, date_to)
+
+    period = ""
+    if date_from and date_to:
+        period = f" за {date_from} - {date_to}"
+    elif date_from:
+        period = f" с {date_from}"
+
+    text = f"Статистика{period}\n\nВсего записей: {stats['total']}\n"
+
+    if stats["by_board"]:
+        text += "\nПо бортам:\n"
+        for row in stats["by_board"][:10]:
+            text += f"  {row['board_serial']}: {row['cnt']}\n"
+
+    if stats["by_employee"]:
+        text += "\nПо сотрудникам:\n"
+        for row in stats["by_employee"][:10]:
+            text += f"  {row['full_name']}: {row['cnt']}\n"
+
+    if stats["by_category"]:
+        text += "\nПо категориям:\n"
+        for row in stats["by_category"]:
+            cat_name = CATEGORIES.get(row["category"], row["category"])
+            text += f"  {cat_name}: {row['cnt']}\n"
+
+    await message.answer(text)
+
+
+# --- photo download helpers ---
+
 async def _download_one(bot: Bot, photo: dict, log_id: int, tmp_dir: str) -> str | None:
     try:
         file = await bot.get_file(photo["file_id"])
@@ -104,8 +301,7 @@ async def _download_one(bot: Bot, photo: dict, log_id: int, tmp_dir: str) -> str
 
 
 async def _download_photos(bot: Bot, log_ids: list[int], tmp_dir: str) -> dict[int, list[str]]:
-    """Download photos for given log IDs in parallel. Returns {log_id: [local_path, ...]}."""
-    # Collect all download tasks
+    """Download photos for given log IDs in parallel."""
     tasks: list[tuple[int, asyncio.Task]] = []
     for log_id in log_ids:
         photos = await get_photos(log_id)
@@ -113,7 +309,6 @@ async def _download_photos(bot: Bot, log_ids: list[int], tmp_dir: str) -> dict[i
             task = asyncio.create_task(_download_one(bot, photo, log_id, tmp_dir))
             tasks.append((log_id, task))
 
-    # Await all downloads concurrently
     result: dict[int, list[str]] = {}
     for log_id, task in tasks:
         path = await task
@@ -121,6 +316,8 @@ async def _download_photos(bot: Bot, log_ids: list[int], tmp_dir: str) -> dict[i
             result.setdefault(log_id, []).append(path)
     return result
 
+
+# --- export ---
 
 @router.message(Command("export"))
 async def cmd_export(message: Message, employee: dict, bot: Bot) -> None:
@@ -218,6 +415,43 @@ async def cmd_export_all(message: Message, employee: dict, bot: Bot) -> None:
     await message.answer_document(doc, caption=f"Полная выгрузка ({total_count} записей)")
 
 
+@router.message(Command("export_period"))
+async def cmd_export_period(message: Message, employee: dict, bot: Bot) -> None:
+    if employee["role"] not in ("lead", "admin"):
+        await message.answer("Экспорт по периоду доступен руководителям и админам.")
+        return
+
+    args = message.text.split()
+    if len(args) < 3:
+        await message.answer("Использование: /export_period <YYYY-MM-DD> <YYYY-MM-DD>")
+        return
+
+    date_from, date_to = args[1], args[2]
+    for d in (date_from, date_to):
+        try:
+            datetime.strptime(d, "%Y-%m-%d")
+        except ValueError:
+            await message.answer("Неверный формат даты. Используйте YYYY-MM-DD")
+            return
+
+    all_logs, total_count = await get_logs_for_export(date_from=date_from, date_to=date_to)
+    if total_count == 0:
+        await message.answer(f"Нет записей за период {date_from} - {date_to}.")
+        return
+
+    await message.answer("Формирую PDF, подождите...")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        all_log_ids = [entry["id"] for logs in all_logs.values() for entry in logs]
+        photo_paths = await _download_photos(bot, all_log_ids, tmp_dir)
+        pdf_bytes = build_full_pdf(all_logs, photo_paths)
+
+    doc = BufferedInputFile(pdf_bytes, filename=f"export_{date_from}_{date_to}.pdf")
+    await message.answer_document(doc, caption=f"Экспорт за {date_from} - {date_to} ({total_count} записей)")
+
+
+# --- help ---
+
 @router.message(Command("help"))
 async def cmd_help(message: Message, employee: dict) -> None:
     text = (
@@ -230,12 +464,20 @@ async def cmd_help(message: Message, employee: dict) -> None:
         "/board_list - список бортов\n"
         "/board_info <борт> - информация о борте\n"
         "/export <борт> - экспорт истории борта в PDF\n"
+        "/edit_log <id> - редактировать запись\n"
+        "/template_add - создать шаблон работы\n"
+        "/templates - список шаблонов\n"
         "/start - обновить профиль\n"
         "/cancel - отменить текущее действие\n"
     )
 
     if employee["role"] in ("lead", "admin"):
-        text += "\nРуководитель:\n/board_add <борт> [модель] - добавить борт\n"
+        text += (
+            "\nРуководитель:\n"
+            "/board_add <борт> [модель] - добавить борт\n"
+            "/stats [от] [до] - статистика\n"
+            "/export_period <от> <до> - экспорт за период\n"
+        )
 
     if employee["role"] == "admin":
         text += (
@@ -243,7 +485,9 @@ async def cmd_help(message: Message, employee: dict) -> None:
             "/set_role <telegram_id> <worker|lead|admin> - назначить роль\n"
             "/users - список сотрудников\n"
             "/delete_log <id> - удалить запись\n"
+            "/restore_log <id> - восстановить запись\n"
             "/board_delete <борт> - удалить борт\n"
+            "/restore_board <борт> - восстановить борт\n"
             "/export_all - полная выгрузка\n"
         )
 

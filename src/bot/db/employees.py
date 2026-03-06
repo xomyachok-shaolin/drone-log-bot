@@ -43,3 +43,20 @@ async def list_employees() -> list[dict]:
     db = await get_db()
     rows = await db.execute_fetchall("SELECT * FROM employees ORDER BY full_name")
     return [dict(r) for r in rows]
+
+
+async def get_last_board(telegram_id: int) -> str | None:
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT last_board FROM employees WHERE telegram_id = ?", (telegram_id,)
+    )
+    return rows[0]["last_board"] if rows and rows[0]["last_board"] else None
+
+
+async def update_last_board(telegram_id: int, board_serial: str) -> None:
+    db = await get_db()
+    await db.execute(
+        "UPDATE employees SET last_board = ? WHERE telegram_id = ?",
+        (board_serial, telegram_id),
+    )
+    await db.commit()

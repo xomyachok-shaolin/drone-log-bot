@@ -1,18 +1,21 @@
 import structlog
 
-from aiogram import Router, F
+from aiogram import Bot, Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 
+from bot.config import settings
 from bot.db.boards import list_boards
-from bot.db.work_logs import create_work_log, add_photo
+from bot.db.employees import get_last_board, update_last_board
+from bot.db.work_logs import create_work_log, add_photo, find_duplicate
 
 log = structlog.get_logger()
 from bot.keyboards.inline import (
     boards_keyboard,
     categories_keyboard,
     confirm_keyboard,
+    confirm_duplicate_keyboard,
     photo_keyboard,
     CATEGORIES,
 )
@@ -29,6 +32,20 @@ async def cmd_log(message: Message, state: FSMContext, employee: dict) -> None:
         return
 
     await state.update_data(photos=[])
+
+    # Check last used board
+    last_board = await get_last_board(employee["telegram_id"])
+    if last_board:
+        board_exists = any(b["serial"] == last_board for b in boards)
+        if board_exists:
+            await state.update_data(board_serial=last_board)
+            await state.set_state(WorkLogStates.choosing_category)
+            await message.answer(
+                f"Борт: {last_board} (последний)\n\nКатегория работы:",
+                reply_markup=categories_keyboard(),
+            )
+            return
+
     await state.set_state(WorkLogStates.choosing_board)
     await message.answer("Выберите борт:", reply_markup=boards_keyboard(boards))
 
@@ -45,11 +62,25 @@ async def boards_page(callback: CallbackQuery, state: FSMContext) -> None:
 async def board_chosen(callback: CallbackQuery, state: FSMContext) -> None:
     serial = callback.data.split(":")[1]
     await state.update_data(board_serial=serial)
-    await state.set_state(WorkLogStates.choosing_category)
-    await callback.message.edit_text(
-        f"Борт: {serial}\n\nКатегория работы:",
-        reply_markup=categories_keyboard(),
-    )
+    data = await state.get_data()
+
+    # If template pre-filled category and description, skip to photo step
+    if data.get("category") and data.get("description"):
+        await state.set_state(WorkLogStates.waiting_photo)
+        cat_name = CATEGORIES.get(data["category"], data["category"])
+        await callback.message.edit_text(
+            f"Борт: {serial}\n"
+            f"Категория: {cat_name}\n"
+            f"Описание: {data['description'][:100]}\n\n"
+            "Приложить фото? Отправьте фото или нажмите \"Пропустить\".",
+            reply_markup=photo_keyboard(),
+        )
+    else:
+        await state.set_state(WorkLogStates.choosing_category)
+        await callback.message.edit_text(
+            f"Борт: {serial}\n\nКатегория работы:",
+            reply_markup=categories_keyboard(),
+        )
     await callback.answer()
 
 
@@ -109,10 +140,29 @@ async def photo_received(message: Message, state: FSMContext) -> None:
 
 
 @router.callback_query(WorkLogStates.waiting_photo, F.data.in_({"photo:done", "photo:skip"}))
-async def photo_done(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(WorkLogStates.confirming)
+async def photo_done(callback: CallbackQuery, state: FSMContext, employee: dict) -> None:
     data = await state.get_data()
 
+    # Check for duplicates
+    dup = await find_duplicate(
+        data["board_serial"], employee["telegram_id"], data["category"], data["description"]
+    )
+    if dup:
+        await state.set_state(WorkLogStates.confirming)
+        await state.update_data(dup_warned=True)
+        await callback.message.edit_text(
+            f"Похожая запись уже есть (#{dup['id']} от {dup['created_at']}).\n"
+            "Всё равно сохранить?",
+            reply_markup=confirm_duplicate_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    await _show_confirm(callback, state, data)
+
+
+async def _show_confirm(callback: CallbackQuery, state: FSMContext, data: dict) -> None:
+    await state.set_state(WorkLogStates.confirming)
     cat_name = CATEGORIES.get(data["category"], data["category"])
     photos = data.get("photos", [])
     desc_preview = data["description"][:200]
@@ -130,8 +180,7 @@ async def photo_done(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.callback_query(WorkLogStates.confirming, F.data == "confirm:save")
-async def confirm_save(callback: CallbackQuery, state: FSMContext, employee: dict) -> None:
+async def _save_log(callback: CallbackQuery, state: FSMContext, employee: dict, bot: Bot) -> None:
     data = await state.get_data()
     log_id = await create_work_log(
         board_serial=data["board_serial"],
@@ -142,6 +191,9 @@ async def confirm_save(callback: CallbackQuery, state: FSMContext, employee: dic
     photos = data.get("photos", [])
     for file_id in photos:
         await add_photo(log_id, file_id)
+
+    # Remember last board
+    await update_last_board(employee["telegram_id"], data["board_serial"])
 
     log.info(
         "work_logged",
@@ -155,8 +207,34 @@ async def confirm_save(callback: CallbackQuery, state: FSMContext, employee: dic
     await state.clear()
     await callback.answer()
 
+    # Notify group chat
+    if settings.notify_chat_id:
+        cat_name = CATEGORIES.get(data["category"], data["category"])
+        desc = data["description"][:100]
+        notify_text = (
+            f"Новая запись #{log_id}\n"
+            f"Борт: {data['board_serial']}\n"
+            f"Категория: {cat_name}\n"
+            f"Описание: {desc}\n"
+            f"Автор: {employee['full_name']}"
+        )
+        try:
+            await bot.send_message(settings.notify_chat_id, notify_text)
+        except Exception:
+            log.warning("notify_failed", chat_id=settings.notify_chat_id)
 
-@router.callback_query(WorkLogStates.confirming, F.data == "confirm:cancel")
+
+@router.callback_query(WorkLogStates.confirming, F.data == "confirm:save")
+async def confirm_save(callback: CallbackQuery, state: FSMContext, employee: dict, bot: Bot) -> None:
+    await _save_log(callback, state, employee, bot)
+
+
+@router.callback_query(WorkLogStates.confirming, F.data == "dup:save")
+async def dup_save(callback: CallbackQuery, state: FSMContext, employee: dict, bot: Bot) -> None:
+    await _save_log(callback, state, employee, bot)
+
+
+@router.callback_query(WorkLogStates.confirming, F.data.in_({"confirm:cancel", "dup:cancel"}))
 async def confirm_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.message.edit_text("Запись отменена.")

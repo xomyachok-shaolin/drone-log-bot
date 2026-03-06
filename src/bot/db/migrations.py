@@ -6,7 +6,16 @@ CREATE TABLE IF NOT EXISTS employees (
     full_name     TEXT NOT NULL,
     role          TEXT NOT NULL DEFAULT 'worker',
     position      TEXT,
+    last_board    TEXT,
     registered_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS work_templates (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT NOT NULL,
+    category      TEXT NOT NULL,
+    description   TEXT NOT NULL,
+    created_by    INTEGER REFERENCES employees(telegram_id)
 );
 
 CREATE TABLE IF NOT EXISTS boards (
@@ -45,6 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_logs_category ON work_logs(category);
 MIGRATIONS = [
     "ALTER TABLE boards ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE work_logs ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE employees ADD COLUMN last_board TEXT",
 ]
 
 

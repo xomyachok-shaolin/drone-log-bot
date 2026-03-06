@@ -60,14 +60,16 @@ async def start() -> None:
 
     await bot.set_my_commands([
         BotCommand(command="log", description="Записать работу на борте"),
+        BotCommand(command="log_tpl", description="Записать по шаблону"),
         BotCommand(command="history", description="История по борту"),
         BotCommand(command="history_my", description="Мои работы"),
         BotCommand(command="history_date", description="Работы за дату"),
         BotCommand(command="search", description="Поиск по описанию"),
         BotCommand(command="board_list", description="Список бортов"),
         BotCommand(command="board_info", description="Информация о борте"),
-        BotCommand(command="board_add", description="Добавить борт"),
         BotCommand(command="export", description="Экспорт истории борта в PDF"),
+        BotCommand(command="stats", description="Статистика работ"),
+        BotCommand(command="templates", description="Шаблоны работ"),
         BotCommand(command="help", description="Список команд"),
         BotCommand(command="cancel", description="Отменить действие"),
     ])

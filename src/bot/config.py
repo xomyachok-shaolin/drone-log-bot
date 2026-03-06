@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     db_path: Path = Path("./data/drone_log.db")
     log_level: str = "info"
     page_size: int = 5
+    notify_chat_id: int | None = None
 
     @field_validator("admin_ids", mode="before")
     @classmethod
