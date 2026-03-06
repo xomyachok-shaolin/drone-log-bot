@@ -33,6 +33,22 @@ async def get_photos(work_log_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_photos_batch(log_ids: list[int]) -> dict[int, list[dict]]:
+    """Fetch photos for multiple log IDs in one query."""
+    if not log_ids:
+        return {}
+    db = await get_db()
+    placeholders = ",".join("?" for _ in log_ids)
+    rows = await db.execute_fetchall(
+        f"SELECT * FROM work_photos WHERE work_log_id IN ({placeholders})", log_ids
+    )
+    result: dict[int, list[dict]] = {}
+    for r in rows:
+        d = dict(r)
+        result.setdefault(d["work_log_id"], []).append(d)
+    return result
+
+
 async def get_logs_by_board(
     board_serial: str,
     employee_id: int | None = None,

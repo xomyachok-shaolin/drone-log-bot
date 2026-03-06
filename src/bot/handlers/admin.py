@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +14,7 @@ from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from bot.db.boards import list_boards, restore_board
 from bot.db.employees import list_employees, set_role
 from bot.db.work_logs import (
-    delete_log, get_log, get_logs_by_board, get_photos,
+    delete_log, get_log, get_logs_by_board, get_photos_batch,
     restore_log, update_log, get_stats, get_logs_for_export,
 )
 from bot.export_pdf import build_board_pdf, build_full_pdf
@@ -290,31 +291,34 @@ async def cmd_stats(message: Message, employee: dict) -> None:
 
 # --- photo download helpers ---
 
-async def _download_one(bot: Bot, photo: dict, log_id: int, tmp_dir: str) -> str | None:
+async def _download_one(bot: Bot, photo: dict, log_id: int, tmp_dir: str) -> tuple[int, str | None]:
     try:
         file = await bot.get_file(photo["file_id"])
         local_path = Path(tmp_dir) / f"photo_{log_id}_{photo['id']}.jpg"
         await bot.download_file(file.file_path, str(local_path))
-        return str(local_path)
+        return log_id, str(local_path)
     except Exception:
-        return None
+        return log_id, None
 
 
 async def _download_photos(bot: Bot, log_ids: list[int], tmp_dir: str) -> dict[int, list[str]]:
-    """Download photos for given log IDs in parallel."""
-    tasks: list[tuple[int, asyncio.Task]] = []
-    for log_id in log_ids:
-        photos = await get_photos(log_id)
-        for photo in photos:
-            task = asyncio.create_task(_download_one(bot, photo, log_id, tmp_dir))
-            tasks.append((log_id, task))
+    """Download photos for given log IDs in parallel. Single DB query + concurrent downloads."""
+    photos_by_log = await get_photos_batch(log_ids)
+    if not photos_by_log:
+        return {}
 
-    result: dict[int, list[str]] = {}
-    for log_id, task in tasks:
-        path = await task
+    tasks = [
+        _download_one(bot, photo, log_id, tmp_dir)
+        for log_id, photos in photos_by_log.items()
+        for photo in photos
+    ]
+    results = await asyncio.gather(*tasks)
+
+    out: dict[int, list[str]] = {}
+    for log_id, path in results:
         if path:
-            result.setdefault(log_id, []).append(path)
-    return result
+            out.setdefault(log_id, []).append(path)
+    return out
 
 
 # --- export ---
@@ -362,7 +366,10 @@ async def _do_export(
     with tempfile.TemporaryDirectory() as tmp_dir:
         log_ids = [entry["id"] for entry in logs]
         photo_paths = await _download_photos(bot, log_ids, tmp_dir)
-        pdf_bytes = build_board_pdf(serial, logs, photo_paths)
+        loop = asyncio.get_event_loop()
+        pdf_bytes = await loop.run_in_executor(
+            None, functools.partial(build_board_pdf, serial, logs, photo_paths)
+        )
 
     doc = BufferedInputFile(pdf_bytes, filename=f"{serial}_history.pdf")
     await send_to.answer_document(doc, caption=f"История борта {serial} ({total} записей)")
@@ -409,7 +416,10 @@ async def cmd_export_all(message: Message, employee: dict, bot: Bot) -> None:
     with tempfile.TemporaryDirectory() as tmp_dir:
         all_log_ids = [entry["id"] for serial_logs in all_logs.values() for entry in serial_logs]
         photo_paths = await _download_photos(bot, all_log_ids, tmp_dir)
-        pdf_bytes = build_full_pdf(all_logs, photo_paths)
+        loop = asyncio.get_event_loop()
+        pdf_bytes = await loop.run_in_executor(
+            None, functools.partial(build_full_pdf, all_logs, photo_paths)
+        )
 
     doc = BufferedInputFile(pdf_bytes, filename="all_history.pdf")
     await message.answer_document(doc, caption=f"Полная выгрузка ({total_count} записей)")
@@ -444,7 +454,10 @@ async def cmd_export_period(message: Message, employee: dict, bot: Bot) -> None:
     with tempfile.TemporaryDirectory() as tmp_dir:
         all_log_ids = [entry["id"] for logs in all_logs.values() for entry in logs]
         photo_paths = await _download_photos(bot, all_log_ids, tmp_dir)
-        pdf_bytes = build_full_pdf(all_logs, photo_paths)
+        loop = asyncio.get_event_loop()
+        pdf_bytes = await loop.run_in_executor(
+            None, functools.partial(build_full_pdf, all_logs, photo_paths)
+        )
 
     doc = BufferedInputFile(pdf_bytes, filename=f"export_{date_from}_{date_to}.pdf")
     await message.answer_document(doc, caption=f"Экспорт за {date_from} - {date_to} ({total_count} записей)")
