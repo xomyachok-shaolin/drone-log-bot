@@ -44,6 +44,26 @@ CREATE TABLE IF NOT EXISTS work_photos (
     caption       TEXT
 );
 
+CREATE TABLE IF NOT EXISTS audit_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_id      INTEGER NOT NULL REFERENCES employees(telegram_id),
+    action        TEXT NOT NULL,
+    target_type   TEXT,
+    target_id     TEXT,
+    details       TEXT,
+    created_at    TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS work_documents (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_log_id   INTEGER NOT NULL REFERENCES work_logs(id) ON DELETE CASCADE,
+    file_id       TEXT NOT NULL,
+    file_name     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor_id);
+CREATE INDEX IF NOT EXISTS idx_audit_date ON audit_log(created_at);
+
 CREATE INDEX IF NOT EXISTS idx_logs_board ON work_logs(board_serial);
 CREATE INDEX IF NOT EXISTS idx_logs_employee ON work_logs(employee_id);
 CREATE INDEX IF NOT EXISTS idx_logs_date ON work_logs(created_at);

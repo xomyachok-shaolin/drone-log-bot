@@ -25,6 +25,15 @@ async def add_photo(work_log_id: int, file_id: str, caption: str | None = None) 
     await db.commit()
 
 
+async def add_document(work_log_id: int, file_id: str, file_name: str | None = None) -> None:
+    db = await get_db()
+    await db.execute(
+        "INSERT INTO work_documents (work_log_id, file_id, file_name) VALUES (?, ?, ?)",
+        (work_log_id, file_id, file_name),
+    )
+    await db.commit()
+
+
 async def get_photos(work_log_id: int) -> list[dict]:
     db = await get_db()
     rows = await db.execute_fetchall(

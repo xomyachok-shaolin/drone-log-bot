@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     log_level: str = "info"
     page_size: int = 5
     notify_chat_id: int | None = None
+    reminder_days: int = 14
+    backup_enabled: bool = True
+    digest_enabled: bool = True
 
     @field_validator("admin_ids", mode="before")
     @classmethod

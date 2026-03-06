@@ -14,6 +14,7 @@ from bot.db.connection import init_db, close_db
 from bot.db.migrations import run_migrations
 from bot.handlers import setup_routers
 from bot.middleware.auth import AuthMiddleware
+from bot.tasks import run_scheduled_tasks
 
 cancel_router = Router()
 
@@ -89,9 +90,11 @@ async def start() -> None:
         log.error("unhandled_error", error=str(exception), exc_info=exception)
 
     log.info("bot_starting")
+    scheduler = asyncio.create_task(run_scheduled_tasks(bot))
     try:
         await dp.start_polling(bot)
     finally:
+        scheduler.cancel()
         await close_db()
         await bot.session.close()
         log.info("bot_stopped")

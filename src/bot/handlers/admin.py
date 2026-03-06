@@ -11,6 +11,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 
+from bot.db.audit import log_action, get_audit_log
 from bot.db.boards import list_boards, restore_board
 from bot.db.employees import list_employees, set_role
 from bot.db.work_logs import (
@@ -55,6 +56,7 @@ async def cmd_set_role(message: Message, employee: dict) -> None:
     ok = await set_role(target_id, role)
     if ok:
         alog.info("role_changed", target=target_id, role=role, by=employee["telegram_id"])
+        await log_action(employee["telegram_id"], "set_role", "employee", str(target_id), f"role={role}")
         await message.answer(f"Роль пользователя {target_id} изменена на {role}.")
     else:
         await message.answer(f"Пользователь {target_id} не найден.")
@@ -103,6 +105,7 @@ async def cmd_delete_log(message: Message, employee: dict) -> None:
     ok = await delete_log(log_id)
     if ok:
         alog.info("log_deleted", log_id=log_id, by=employee["telegram_id"])
+        await log_action(employee["telegram_id"], "delete_log", "work_log", str(log_id))
         await message.answer(f"Запись #{log_id} удалена.")
     else:
         await message.answer(f"Запись #{log_id} не найдена.")
@@ -128,6 +131,7 @@ async def cmd_restore_log(message: Message, employee: dict) -> None:
     ok = await restore_log(log_id)
     if ok:
         alog.info("log_restored", log_id=log_id, by=employee["telegram_id"])
+        await log_action(employee["telegram_id"], "restore_log", "work_log", str(log_id))
         await message.answer(f"Запись #{log_id} восстановлена.")
     else:
         await message.answer(f"Запись #{log_id} не найдена среди удалённых.")
@@ -148,6 +152,7 @@ async def cmd_restore_board(message: Message, employee: dict) -> None:
     ok = await restore_board(serial)
     if ok:
         alog.info("board_restored", serial=serial, by=employee["telegram_id"])
+        await log_action(employee["telegram_id"], "restore_board", "board", serial)
         await message.answer(f"Борт {serial} восстановлен.")
     else:
         await message.answer(f"Борт {serial} не найден среди удалённых.")
@@ -287,6 +292,28 @@ async def cmd_stats(message: Message, employee: dict) -> None:
             text += f"  {cat_name}: {row['cnt']}\n"
 
     await message.answer(text)
+
+
+# --- audit ---
+
+@router.message(Command("audit"))
+async def cmd_audit(message: Message, employee: dict) -> None:
+    if employee["role"] != "admin":
+        await message.answer("Только админ может просматривать журнал действий.")
+        return
+
+    entries, total = await get_audit_log(limit=20)
+    if not entries:
+        await message.answer("Журнал действий пуст.")
+        return
+
+    lines = [f"Журнал действий ({total}):\n"]
+    for e in entries:
+        target = f" {e['target_type']}:{e['target_id']}" if e.get("target_type") else ""
+        details = f" ({e['details']})" if e.get("details") else ""
+        lines.append(f"  {e['created_at']} | {e['full_name']} | {e['action']}{target}{details}")
+
+    await message.answer("\n".join(lines))
 
 
 # --- photo download helpers ---
@@ -470,6 +497,7 @@ async def cmd_help(message: Message, employee: dict) -> None:
     text = (
         "Доступные команды:\n\n"
         "/log - записать работу на борте\n"
+        "/log_tpl - записать по шаблону\n"
         "/history <борт> - история по борту\n"
         "/history_my - мои работы\n"
         "/history_date <YYYY-MM-DD> - работы за дату\n"
@@ -478,7 +506,6 @@ async def cmd_help(message: Message, employee: dict) -> None:
         "/board_info <борт> - информация о борте\n"
         "/export <борт> - экспорт истории борта в PDF\n"
         "/edit_log <id> - редактировать запись\n"
-        "/template_add - создать шаблон работы\n"
         "/templates - список шаблонов\n"
         "/start - обновить профиль\n"
         "/cancel - отменить текущее действие\n"
@@ -502,6 +529,9 @@ async def cmd_help(message: Message, employee: dict) -> None:
             "/board_delete <борт> - удалить борт\n"
             "/restore_board <борт> - восстановить борт\n"
             "/export_all - полная выгрузка\n"
+            "/audit - журнал действий\n"
+            "/template_add - создать шаблон\n"
+            "/template_delete <id> - удалить шаблон\n"
         )
 
     await message.answer(text)

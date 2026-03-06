@@ -8,7 +8,7 @@ from aiogram.types import Message, CallbackQuery
 from bot.config import settings
 from bot.db.boards import list_boards
 from bot.db.employees import get_last_board, update_last_board
-from bot.db.work_logs import create_work_log, add_photo, find_duplicate
+from bot.db.work_logs import create_work_log, add_photo, add_document, find_duplicate
 
 log = structlog.get_logger()
 from bot.keyboards.inline import (
@@ -16,6 +16,7 @@ from bot.keyboards.inline import (
     categories_keyboard,
     confirm_keyboard,
     confirm_duplicate_keyboard,
+    last_board_keyboard,
     photo_keyboard,
     CATEGORIES,
 )
@@ -31,23 +32,45 @@ async def cmd_log(message: Message, state: FSMContext, employee: dict) -> None:
         await message.answer("Нет зарегистрированных бортов. Сначала добавьте борт: /board_add")
         return
 
-    await state.update_data(photos=[])
+    await state.update_data(photos=[], documents=[])
 
     # Check last used board
     last_board = await get_last_board(employee["telegram_id"])
     if last_board:
         board_exists = any(b["serial"] == last_board for b in boards)
         if board_exists:
-            await state.update_data(board_serial=last_board)
-            await state.set_state(WorkLogStates.choosing_category)
+            await state.update_data(last_board_serial=last_board)
+            await state.set_state(WorkLogStates.choosing_board)
             await message.answer(
-                f"Борт: {last_board} (последний)\n\nКатегория работы:",
-                reply_markup=categories_keyboard(),
+                "Последний борт или другой?",
+                reply_markup=last_board_keyboard(last_board),
             )
             return
 
     await state.set_state(WorkLogStates.choosing_board)
     await message.answer("Выберите борт:", reply_markup=boards_keyboard(boards))
+
+
+@router.callback_query(WorkLogStates.choosing_board, F.data == "last_b:yes")
+async def last_board_yes(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    serial = data["last_board_serial"]
+    await state.update_data(board_serial=serial)
+    await state.set_state(WorkLogStates.choosing_category)
+    await callback.message.edit_text(
+        f"Борт: {serial}\n\nКатегория работы:",
+        reply_markup=categories_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(WorkLogStates.choosing_board, F.data == "last_b:no")
+async def last_board_no(callback: CallbackQuery, state: FSMContext) -> None:
+    boards = await list_boards()
+    await callback.message.edit_text(
+        "Выберите борт:", reply_markup=boards_keyboard(boards)
+    )
+    await callback.answer()
 
 
 @router.callback_query(WorkLogStates.choosing_board, F.data.startswith("board_pg:"))
@@ -116,6 +139,7 @@ async def description_entered(message: Message, state: FSMContext) -> None:
 
 
 MAX_PHOTOS = 10
+MAX_DOCS = 5
 
 
 @router.message(WorkLogStates.waiting_photo, F.photo)
@@ -134,7 +158,28 @@ async def photo_received(message: Message, state: FSMContext) -> None:
     remaining = MAX_PHOTOS - len(photos)
     hint = f" (ещё можно {remaining})" if remaining > 0 else " (максимум)"
     await message.answer(
-        f"Фото добавлено ({len(photos)} шт.){hint}. Ещё фото или \"Готово\"?",
+        f"Фото добавлено ({len(photos)} шт.){hint}. Ещё фото/документ или \"Готово\"?",
+        reply_markup=photo_keyboard(),
+    )
+
+
+@router.message(WorkLogStates.waiting_photo, F.document)
+async def document_received(message: Message, state: FSMContext) -> None:
+    doc = message.document
+    data = await state.get_data()
+    docs = data.get("documents", [])
+    if len(docs) >= MAX_DOCS:
+        await message.answer(
+            f"Максимум {MAX_DOCS} документов. Нажмите \"Готово\".",
+            reply_markup=photo_keyboard(),
+        )
+        return
+    docs.append({"file_id": doc.file_id, "file_name": doc.file_name or "document"})
+    await state.update_data(documents=docs)
+    photos = data.get("photos", [])
+    total = len(photos) + len(docs)
+    await message.answer(
+        f"Документ добавлен. Вложений: {total} шт. Ещё фото/документ или \"Готово\"?",
         reply_markup=photo_keyboard(),
     )
 
@@ -169,12 +214,17 @@ async def _show_confirm(callback: CallbackQuery, state: FSMContext, data: dict) 
     if len(data["description"]) > 200:
         desc_preview += "..."
 
+    docs = data.get("documents", [])
+    attach = f"Фото: {len(photos)} шт."
+    if docs:
+        attach += f", документов: {len(docs)} шт."
+
     text = (
         f"Проверьте запись:\n\n"
         f"Борт: {data['board_serial']}\n"
         f"Категория: {cat_name}\n"
         f"Описание: {desc_preview}\n"
-        f"Фото: {len(photos)} шт."
+        f"{attach}"
     )
     await callback.message.edit_text(text, reply_markup=confirm_keyboard())
     await callback.answer()
@@ -191,6 +241,9 @@ async def _save_log(callback: CallbackQuery, state: FSMContext, employee: dict, 
     photos = data.get("photos", [])
     for file_id in photos:
         await add_photo(log_id, file_id)
+    docs = data.get("documents", [])
+    for d in docs:
+        await add_document(log_id, d["file_id"], d.get("file_name"))
 
     # Remember last board
     await update_last_board(employee["telegram_id"], data["board_serial"])

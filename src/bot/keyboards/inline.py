@@ -116,6 +116,17 @@ def templates_keyboard(templates: list[dict], action: str = "use") -> InlineKeyb
     return builder.as_markup()
 
 
+def last_board_keyboard(serial: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=f"{serial}", callback_data=f"last_b:yes"),
+                InlineKeyboardButton(text="Другой борт", callback_data="last_b:no"),
+            ]
+        ]
+    )
+
+
 def confirm_duplicate_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

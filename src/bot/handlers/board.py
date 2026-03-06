@@ -4,6 +4,7 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 
+from bot.db.audit import log_action
 from bot.db.boards import create_board, delete_board, get_board, list_boards
 from bot.db.work_logs import get_logs_by_board
 from bot.keyboards.inline import CATEGORIES, boards_keyboard
@@ -73,6 +74,7 @@ async def cmd_board_delete(message: Message, employee: dict) -> None:
     serial = args[1].upper()
     ok = await delete_board(serial)
     if ok:
+        await log_action(employee["telegram_id"], "delete_board", "board", serial)
         await message.answer(f"Борт {serial} удалён.")
     else:
         await message.answer(f"Борт {serial} не найден.")
